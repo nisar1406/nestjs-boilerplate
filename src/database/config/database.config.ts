@@ -11,7 +11,7 @@ import { AllConfigType } from '../../configs/config.type';
 export class DatabaseConfig implements MongooseOptionsFactory {
   constructor(private readonly configService: ConfigService<AllConfigType>) {}
   createMongooseOptions(): MongooseModuleOptions {
-    // Retrieve database connection URI and other options from environment variables
+    /// Retrieve database connection URI and other options from environment variables
     const username = this.configService.getOrThrow<string>(
       'database.username',
       {
