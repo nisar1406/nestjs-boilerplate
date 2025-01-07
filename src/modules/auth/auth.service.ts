@@ -10,7 +10,7 @@ import * as bcrypt from 'bcrypt';
 import * as JWT from 'jsonwebtoken';
 
 import { AllConfigType } from '../../../src/configs';
-import { IUser } from '../../model';
+import { IToken, IUser, TokenType } from '../../model';
 import { MailService } from '../../services/mail/mail.service';
 import { TokenService } from '../token/token.service';
 import { UsersService } from '../users/users.service';
@@ -109,9 +109,17 @@ export class AuthService {
 
   async updateAccessToken(refreshToken: string) {
     try {
-      const userId = this.verifyRefreshToken(refreshToken);
+      const storedRefreshToken = await this.tokenService.getTokenByUserAndType(
+        refreshToken,
+        TokenType.REFRESH,
+      );
 
-      const tokens = await this.generateTokens(userId.toString());
+      if (!storedRefreshToken) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+      const userEmail = this.verifyRefreshToken(refreshToken);
+
+      const tokens = await this.generateTokens(userEmail.toString());
 
       return tokens.accessToken;
     } catch (e) {
@@ -119,27 +127,76 @@ export class AuthService {
     }
   }
 
-  private async generateTokens(id: string) {
-    const payload = { id };
-    console.log(payload, 'payload');
+  private async generateTokens(email: string) {
+    const payload = { email };
+    // Fetch existing valid tokens for the user (both access and refresh)
+    const [existingAccessToken, existingRefreshToken] = await Promise.all([
+      this.tokenService.getTokenByUserAndType(email, TokenType.ACCESS),
+      this.tokenService.getTokenByUserAndType(email, TokenType.REFRESH),
+    ]);
 
-    const accessToken = JWT.sign(payload, this.secret, {
-      expiresIn: this.expires,
-    });
+    // Revoke old tokens if necessary
+    await Promise.all([
+      existingAccessToken
+        ? this.tokenService.revokeToken(existingAccessToken.token)
+        : null,
+      existingRefreshToken
+        ? this.tokenService.revokeToken(existingRefreshToken.token)
+        : null,
+    ]);
 
-    const refreshToken = JWT.sign(payload, this.refreshSecret, {
-      expiresIn: this.refreshExpires,
-    });
+    const [accessToken, refreshToken] = await Promise.all([
+      JWT.sign(payload, this.secret, {
+        expiresIn: this.expires,
+      }),
+      JWT.sign(payload, this.refreshSecret, {
+        expiresIn: this.refreshExpires,
+      }),
+    ]);
 
-    await this.tokenService.create({ token: accessToken });
-    const tokens = { accessToken, refreshToken };
+    // Define the expiration dates
+    const accessTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 15 minutes
+    const refreshTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-    return tokens;
+    // Prepare the token DTOs
+    const accessTokenDto: Partial<IToken> = this.createTokenDto(
+      accessToken,
+      email,
+      accessTokenExpiry,
+      TokenType.ACCESS,
+    );
+    const refreshTokenDto: Partial<IToken> = this.createTokenDto(
+      refreshToken,
+      email,
+      refreshTokenExpiry,
+      TokenType.REFRESH,
+    );
+
+    // Save new tokens to the database
+    await Promise.all([
+      this.tokenService.createToken(accessTokenDto),
+      this.tokenService.createToken(refreshTokenDto),
+    ]);
+
+    return { accessToken, refreshToken };
   }
 
-  async logout(token: string): Promise<void> {
+  async logout(userId: string, refreshToken: string): Promise<void> {
     // Add the token to the invalidated tokens collection
-    await this.tokenService.create({ token });
+    const storedRefreshToken = await this.tokenService.getTokenByUserAndType(
+      userId,
+      TokenType.REFRESH,
+    );
+
+    if (storedRefreshToken) {
+      if (storedRefreshToken.isValid) {
+        await this.tokenService.revokeToken(refreshToken);
+      } else {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+    } else {
+      throw new UnauthorizedException('Refresh token not found or invalid');
+    }
   }
 
   async forgotPassword(email: string): Promise<void> {
@@ -232,5 +289,20 @@ export class AuthService {
     // });
 
     await this.userService.update(user.id, user);
+  }
+
+  private createTokenDto(
+    token: string,
+    userId: string,
+    expiresAt: Date,
+    tokenType: TokenType,
+  ): IToken {
+    return {
+      token,
+      userId,
+      expiresAt,
+      tokenType,
+      isValid: true,
+    } as IToken;
   }
 }

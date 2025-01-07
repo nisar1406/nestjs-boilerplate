@@ -23,6 +23,7 @@ import {
 import { Request, Response } from 'express';
 
 import { Public } from '../../decorators/common.decorators';
+import { CurrentUser } from '../../decorators/current-user.decorator';
 import { JoiValidationPipe } from '../../pipes';
 import { createUserSchema } from '../users/validation/schema';
 import { AuthService } from './auth.service';
@@ -108,12 +109,49 @@ export class AuthController {
   @ApiOkResponse({
     description: 'User logged out successfully',
   })
-  async logout(@Req() req: Request) {
+  async logout(
+    @Req() req: Request,
+    @Res() res: Response,
+    @CurrentUser() user: { id: string },
+  ) {
     console.log(req);
 
-    // Add the token to the invalidated tokens collection
-    // const data = await this.authService.logout(token);
-    // return data;
+    try {
+      const cookiesString = req.headers?.cookie || req.body.refreshToken;
+
+      if (!cookiesString) {
+        console.log('No cookies found');
+        throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
+      }
+      const refreshToken =
+        cookiesString
+          ?.split(';')
+          .map((cookie) => cookie.trim())
+          .find((cookie) => cookie.startsWith('refreshToken='))
+          ?.split('=')[1] || req.body.refreshToken;
+
+      if (!refreshToken) {
+        console.log('Refresh Token not found');
+        throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
+      }
+      if (refreshToken) {
+        // Invalidate the refresh token in the database or your token store
+        await this.authService.logout(user.id, refreshToken);
+      }
+
+      // Clear the refresh token cookie
+      res.clearCookie('refreshToken', {
+        httpOnly: true,
+        secure: true, // Set this to true if using HTTPS
+        sameSite: 'strict',
+      });
+
+      return { message: 'Logged out successfully' };
+    } catch (error) {
+      res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+        message: 'Error occurred during logout',
+      });
+    }
   }
 
   @Public()
